@@ -12,6 +12,12 @@ typedef enum {
   OP_MOV,
   OP_LEA,
   OP_XOR,
+
+  // new
+  OP_ADD,
+  OP_SUB,
+  OP_CMP,
+  OP_TEST,
 } Op;
 
 typedef enum {
@@ -23,13 +29,13 @@ typedef enum { O_NONE=0, O_REG, O_IMM, O_MEM } OperandKind;
 
 typedef struct {
   OperandKind kind;
-  uint8_t width; // bits
+  uint8_t width; // bits: 8/16/32/64
   union {
-    uint8_t reg;      // 0..15
+    uint8_t reg;      // 0..15 (or 16 for RIP in our printer)
     int64_t imm;
     struct {
-      uint8_t base;   // 0..15 or 0xFF none
-      uint8_t index;  // 0..15 or 0xFF none
+      uint8_t base;   // 0..16, or 0xFF none
+      uint8_t index;  // 0..15, or 0xFF none
       uint8_t scale;  // 1,2,4,8
       int32_t disp;
     } mem;
@@ -37,8 +43,8 @@ typedef struct {
 } Operand;
 
 typedef struct {
-  uint64_t addr;      // address displayed
-  uint8_t size;       // bytes consumed
+  uint64_t addr;
+  uint8_t size;
   uint8_t bytes[16];
   uint8_t bytes_len;
 
@@ -50,6 +56,6 @@ typedef struct {
   Cond cc;
 
   uint8_t has_rel;
-  int64_t rel;        // signed
-  uint8_t rel_width;  // 1 or 4
+  int64_t rel;
+  uint8_t rel_width;
 } Insn;

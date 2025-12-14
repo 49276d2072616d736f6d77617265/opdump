@@ -7,9 +7,9 @@ typedef enum { OT_1=1, OT_2=2 } OpKind;
 typedef struct {
   OpKind kind;
   uint8_t b1;
-  uint8_t b2;   // for OT_2
+  uint8_t b2;
   Op op;
-  uint8_t flags;
+  uint16_t flags;
 } OpEntry;
 
 enum {
@@ -17,8 +17,10 @@ enum {
   OF_REL8      = 1<<0,
   OF_REL32     = 1<<1,
   OF_CC        = 1<<2,
-  OF_REG_RANGE = 1<<3, // e.g. 50..57
-  OF_MODRM     = 1<<4, // /r
+  OF_REG_RANGE = 1<<3,
+  OF_MODRM     = 1<<4,
+  OF_GRP81     = 1<<5, // opcode 0x81 (imm32)
+  OF_GRP83     = 1<<6, // opcode 0x83 (imm8 sign-extended)
 };
 
 extern const OpEntry g_ops[];

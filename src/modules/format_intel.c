@@ -88,6 +88,11 @@ static const char* op_name(Op op) {
     case OP_SETCC: return "setcc";
     case OP_PXOR:  return "pxor";
 
+    case OP_LEAVE: return "leave";
+
+    case OP_CMOVCC: return "cmovcc";
+
+
     default: return "db";
   }
 }
@@ -152,11 +157,28 @@ static void print_operand(FILE *out, const Operand *o) {
   }
 }
 
+// void format_intel(FILE *out, const Insn *in) {
+//   if (in->op == OP_JCC_REL && in->has_cc) {
+//     fprintf(out, "j%s ", cc_name(in->cc));
+//   } else if (in->op == OP_SETCC && in->has_cc) {
+//     fprintf(out, "set%s ", cc_name(in->cc));
+//   } else {
+//     fprintf(out, "%s ", op_name(in->op));
+//   }
+
+//   for (uint8_t i = 0; i < in->op_count; i++) {
+//     if (i) fprintf(out, ", ");
+//     print_operand(out, &in->ops[i]);
+//   }
+// }
+
 void format_intel(FILE *out, const Insn *in) {
   if (in->op == OP_JCC_REL && in->has_cc) {
     fprintf(out, "j%s ", cc_name(in->cc));
   } else if (in->op == OP_SETCC && in->has_cc) {
     fprintf(out, "set%s ", cc_name(in->cc));
+  } else if (in->op == OP_CMOVCC && in->has_cc) {
+    fprintf(out, "cmov%s ", cc_name(in->cc));
   } else {
     fprintf(out, "%s ", op_name(in->op));
   }
@@ -166,3 +188,4 @@ void format_intel(FILE *out, const Insn *in) {
     print_operand(out, &in->ops[i]);
   }
 }
+

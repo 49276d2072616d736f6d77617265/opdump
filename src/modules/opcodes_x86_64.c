@@ -52,6 +52,10 @@ const OpEntry g_ops[] = {
 
   // PXOR xmm, xmm/m128 : 66 0F EF /r
   {OT_2, 0x0F, 0xEF, OP_PXOR, (uint16_t)(OF_MODRM)},
+
+  {OT_1, 0xC9, 0x00, OP_LEAVE, OF_NONE},
+
+  {OT_2, 0x0F, 0x40, OP_CMOVCC, (uint16_t)(OF_MODRM | OF_CC | OF_REG_RANGE)},
 };
 
 const unsigned g_ops_count = sizeof(g_ops)/sizeof(g_ops[0]);

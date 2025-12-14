@@ -31,6 +31,10 @@ typedef enum {
   OP_CALL_RM,
   OP_JMP_RM,
 
+  OP_LEAVE,
+
+  OP_CMOVCC,
+
 } Op;
 
 

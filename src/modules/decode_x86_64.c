@@ -34,7 +34,6 @@ static const OpEntry* match_op_1(uint8_t b1) {
     if (e->kind != OT_1) continue;
 
     if (e->flags & OF_REG_RANGE) {
-      // ranges supported for: 70..7F, 50..57, 58..5F
       if (e->b1 == 0x70 && b1 >= 0x70 && b1 <= 0x7F) return e;
       if (e->b1 == 0x50 && b1 >= 0x50 && b1 <= 0x57) return e;
       if (e->b1 == 0x58 && b1 >= 0x58 && b1 <= 0x5F) return e;
@@ -52,13 +51,38 @@ static const OpEntry* match_op_2(uint8_t b1, uint8_t b2) {
     if (e->b1 != b1) continue;
 
     if (e->flags & OF_REG_RANGE) {
-      // range on b2: 80..8F
       if (e->b2 == 0x80 && b2 >= 0x80 && b2 <= 0x8F) return e;
     } else {
       if (e->b2 == b2) return e;
     }
   }
   return NULL;
+}
+
+static Operand make_reg64(uint8_t r) {
+  Operand o;
+  memset(&o, 0, sizeof(o));
+  o.kind = O_REG;
+  o.width = 64;
+  o.reg = r;
+  return o;
+}
+
+static Operand make_mem64(uint8_t base, int32_t disp) {
+  Operand o;
+  memset(&o, 0, sizeof(o));
+  o.kind = O_MEM;
+  o.width = 64;
+  o.mem.base = base;         // 0..16 or 0xFF
+  o.mem.index = 0xFF;        // MVP: no index yet
+  o.mem.scale = 1;
+  o.mem.disp = disp;
+  return o;
+}
+
+static Operand rm_operand_mvp(uint8_t mod, uint8_t rm_ext, int32_t disp, int is_mem) {
+  if (!is_mem) return make_reg64(rm_ext);
+  return make_mem64(rm_ext, disp);
 }
 
 size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t addr, Insn *out) {
@@ -86,7 +110,6 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
   // opcode
   uint8_t b1 = p[i++];
 
-  // two-byte?
   const OpEntry *op = NULL;
   uint8_t b2 = 0;
   if (b1 == 0x0F) {
@@ -98,7 +121,6 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
   }
 
   if (!op) {
-    // invalid/unknown: consume 1 byte (or rex+1 already)
     out->op = OP_INVALID;
     out->size = (uint8_t)i;
     set_bytes(out, p, i);
@@ -107,14 +129,10 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
 
   out->op = op->op;
 
-  // handle Jcc condition
+  // Jcc condition
   if ((op->flags & OF_CC) && out->op == OP_JCC_REL) {
     out->has_cc = 1;
-    if (op->kind == OT_1) {
-      out->cc = (Cond)(b1 & 0x0F);      // 70..7F
-    } else {
-      out->cc = (Cond)(b2 & 0x0F);      // 0F 80..8F
-    }
+    out->cc = (Cond)((op->kind == OT_1 ? b1 : b2) & 0x0F);
   }
 
   // rel immediates
@@ -125,7 +143,6 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->rel = read_i8(p + i);
     i += 1;
 
-    // operand: absolute target for printing
     out->op_count = 1;
     out->ops[0].kind = O_IMM;
     out->ops[0].width = 64;
@@ -143,55 +160,84 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->ops[0].imm = (int64_t)(addr + (uint64_t)i + out->rel);
   }
 
-  // reg-range push/pop
+  // push/pop reg (range)
   if (out->op == OP_PUSH || out->op == OP_POP) {
     uint8_t low = (uint8_t)(b1 & 7);
     uint8_t reg = (uint8_t)(low | (rex.rex_b ? 8 : 0));
     out->op_count = 1;
-    out->ops[0].kind = O_REG;
-    out->ops[0].width = 64;
-    out->ops[0].reg = reg;
+    out->ops[0] = make_reg64(reg);
   }
 
-  // ModRM ops (MVP: only mod==3 supported)
+  // ModRM ops
   if (op->flags & OF_MODRM) {
     if (i >= n) return 0;
+
     uint8_t modrm = p[i++];
 
     uint8_t mod = get_mod(modrm);
     uint8_t reg = (uint8_t)(get_reg(modrm) | (rex.rex_r ? 8 : 0));
     uint8_t rm  = (uint8_t)(get_rm(modrm)  | (rex.rex_b ? 8 : 0));
 
-    if (mod != 3) {
-      // MVP: memory decoding not implemented yet
+    // SIB not supported yet (rm low3==4) when memory mode
+    if (mod != 3 && ((modrm & 7) == 4)) {
+      // consume what we know (prefix+opcode+modrm) and move on
+      out->op = OP_INVALID;
       out->op_count = 0;
-    } else {
-      // reg-reg forms (Intel: dest/src depends on opcode)
-      Operand o_reg = {0}, o_rm = {0};
-      o_reg.kind = O_REG; o_reg.width = 64; o_reg.reg = reg;
-      o_rm.kind  = O_REG; o_rm.width  = 64; o_rm.reg  = rm;
+      out->size = (uint8_t)i;
+      set_bytes(out, p, i);
+      return i;
+    }
 
-      if (b1 == 0x89) {
-        // mov r/m64, r64  => rm, reg
-        out->op_count = 2;
-        out->ops[0] = o_rm;
-        out->ops[1] = o_reg;
-      } else if (b1 == 0x8B) {
-        // mov r64, r/m64  => reg, rm
-        out->op_count = 2;
-        out->ops[0] = o_reg;
-        out->ops[1] = o_rm;
-      } else if (b1 == 0x8D) {
-        // lea r64, m  (but MVP reg-reg placeholder)
-        out->op_count = 2;
-        out->ops[0] = o_reg;
-        out->ops[1] = o_rm;
-      } else if (b1 == 0x31) {
-        // xor r/m, r => rm, reg
-        out->op_count = 2;
-        out->ops[0] = o_rm;
-        out->ops[1] = o_reg;
+    int32_t disp = 0;
+    int is_mem = (mod != 3);
+
+    if (mod == 0) {
+      if ((modrm & 7) == 5) {
+        // RIP-relative disp32 in x86-64: [rip + disp32]
+        if (i + 4 > n) return 0;
+        disp = (int32_t)read_i32(p + i);
+        i += 4;
+        rm = 16; // use 16 as "rip"
+        is_mem = 1;
+      } else {
+        disp = 0;
       }
+    } else if (mod == 1) {
+      if (i + 1 > n) return 0;
+      disp = (int32_t)read_i8(p + i);
+      i += 1;
+    } else if (mod == 2) {
+      if (i + 4 > n) return 0;
+      disp = (int32_t)read_i32(p + i);
+      i += 4;
+    } else {
+      // mod==3 reg-reg, disp unused
+      disp = 0;
+    }
+
+    Operand o_reg = make_reg64(reg);
+    Operand o_rm  = rm_operand_mvp(mod, rm, disp, is_mem);
+
+    if (b1 == 0x89) {
+      // mov r/m64, r64
+      out->op_count = 2;
+      out->ops[0] = o_rm;
+      out->ops[1] = o_reg;
+    } else if (b1 == 0x8B) {
+      // mov r64, r/m64
+      out->op_count = 2;
+      out->ops[0] = o_reg;
+      out->ops[1] = o_rm;
+    } else if (b1 == 0x8D) {
+      // lea r64, m (allow reg form for now)
+      out->op_count = 2;
+      out->ops[0] = o_reg;
+      out->ops[1] = o_rm;
+    } else if (b1 == 0x31) {
+      // xor r/m, r
+      out->op_count = 2;
+      out->ops[0] = o_rm;
+      out->ops[1] = o_reg;
     }
   }
 

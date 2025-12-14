@@ -37,12 +37,15 @@ static const OpEntry* match_op_1(uint8_t b1) {
       if (e->b1 == 0x70 && b1 >= 0x70 && b1 <= 0x7F) return e;
       if (e->b1 == 0x50 && b1 >= 0x50 && b1 <= 0x57) return e;
       if (e->b1 == 0x58 && b1 >= 0x58 && b1 <= 0x5F) return e;
+
+      if (e->b1 == 0xB8 && b1 >= 0xB8 && b1 <= 0xBF) return e;
     } else {
       if (e->b1 == b1) return e;
     }
   }
   return NULL;
 }
+
 
 static const OpEntry* match_op_2(uint8_t b1, uint8_t b2) {
   for (unsigned i = 0; i < g_ops_count; i++) {
@@ -256,6 +259,46 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->op_count = 1;
     out->ops[0] = make_reg(64, reg);
   }
+  
+  // mov r32/r64, imm (B8..BF) + REX.B extends reg
+  if ((op->flags & OF_MOV_IMM_REG) && (op->flags & OF_REG_RANGE)) {
+    uint8_t low = (uint8_t)(b1 & 7);
+    uint8_t reg = (uint8_t)(low | (rex.rex_b ? 8 : 0));
+
+    uint8_t width = rex.rex_w ? 64 : 32;
+
+    int64_t imm = 0;
+    if (width == 64) {
+      // imm64
+      if (i + 8 > n) return 0;
+      uint64_t v =
+        (uint64_t)p[i+0] |
+        ((uint64_t)p[i+1] << 8) |
+        ((uint64_t)p[i+2] << 16) |
+        ((uint64_t)p[i+3] << 24) |
+        ((uint64_t)p[i+4] << 32) |
+        ((uint64_t)p[i+5] << 40) |
+        ((uint64_t)p[i+6] << 48) |
+        ((uint64_t)p[i+7] << 56);
+      imm = (int64_t)v;
+      i += 8;
+    } else {
+      // imm32 (zero-extends in x86-64 when writing to r32)
+      if (i + 4 > n) return 0;
+      imm = read_i32(p + i);
+      i += 4;
+    }
+
+    out->op = OP_MOV;
+    out->op_count = 2;
+    out->ops[0] = make_reg(width, reg);
+    out->ops[1] = make_imm(width, imm);
+
+    out->size = (uint8_t)i;
+    set_bytes(out, p, i);
+    return i;
+  }
+
 
   // ModRM family
   if (op->flags & OF_MODRM) {

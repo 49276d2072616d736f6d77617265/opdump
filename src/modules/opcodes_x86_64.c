@@ -26,6 +26,8 @@ const OpEntry g_ops[] = {
   {OT_1, 0x81, 0x00, OP_INVALID, (uint16_t)(OF_MODRM | OF_GRP81)}, // add/sub/cmp via /0 /5 /7
   {OT_1, 0x83, 0x00, OP_INVALID, (uint16_t)(OF_MODRM | OF_GRP83)}, // add/sub/cmp via /0 /5 /7 (imm8)
   {OT_1, 0x85, 0x00, OP_TEST,    (uint16_t)(OF_MODRM)},           // test r/m, r
+
+  {OT_1, 0xB8, 0x00, OP_MOV, (uint16_t)(OF_REG_RANGE | OF_MOV_IMM_REG)},
 };
 
 const unsigned g_ops_count = sizeof(g_ops)/sizeof(g_ops[0]);

@@ -176,7 +176,6 @@ static Operand rm_to_operand(const Rex *rex, const uint8_t *p, size_t n, size_t 
 }
 
 static Op grp_alu_op(uint8_t subop) {
-  // minimal subset (expand later)
   if (subop == 0) return OP_ADD; // /0
   if (subop == 4) return OP_AND; // /4
   if (subop == 5) return OP_SUB; // /5
@@ -233,10 +232,13 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
 
   const OpEntry *op = NULL;
   uint8_t b2 = 0;
+  int is_0f = 0;
+
   if (b1 == 0x0F) {
     if (i >= n) return 0;
     b2 = p[i++];
     op = match_op_2(b1, b2);
+    is_0f = 1;
   } else {
     op = match_op_1(b1);
   }
@@ -256,13 +258,13 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->cc = (Cond)((op->kind == OT_1 ? b1 : b2) & 0x0F);
   }
 
-  // SETcc condition (0F 90..9F)
+  // SETcc condition
   if ((op->flags & OF_CC) && out->op == OP_SETCC) {
     out->has_cc = 1;
     out->cc = (Cond)(b2 & 0x0F);
   }
 
-  // rel8 / rel32 (FIXED: compute in int64_t)
+  // rel8 / rel32
   if (op->flags & OF_REL8) {
     if (i + 1 > n) return 0;
     out->has_rel = 1;
@@ -295,6 +297,10 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     uint8_t reg = (uint8_t)(low | (rex.rex_b ? 8 : 0));
     out->op_count = 1;
     out->ops[0] = make_reg(64, reg);
+
+    out->size = (uint8_t)i;
+    set_bytes(out, p, i);
+    return i;
   }
 
   // mov r32/r64, imm (B8..BF)
@@ -340,17 +346,25 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     uint8_t modrm = p[i++];
     uint8_t mod = get_mod(modrm);
 
-    uint8_t subop = get_reg3(modrm); // group selector (NO rex.r extension)
-
+    uint8_t subop = get_reg3(modrm); // group selector
     uint8_t reg_ext = (uint8_t)(get_reg3(modrm) | (rex.rex_r ? 8 : 0));
     uint8_t rm_lo3  = get_rm3(modrm);
     uint8_t rm_ext  = (uint8_t)(rm_lo3 | (rex.rex_b ? 8 : 0));
 
     int is_mem = (mod != 3);
 
-    // width per opcode (MVP):
-    // SETcc and OR(0x08) are 8-bit.
-    uint8_t width = (b1 == 0x08 || out->op == OP_SETCC) ? 8 : (rex.rex_w ? 64 : 32);
+    // width default
+    uint8_t width = (op->flags & OF_BYTE) ? 8 : (rex.rex_w ? 64 : 32);
+
+    // 0F 1F /0 : multi-byte NOP
+    if (out->op == OP_NOP && is_0f && b2 == 0x1F) {
+      // consume rm addressing (ignore result)
+      (void)rm_to_operand(&rex, p, n, &i, width, mod, rm_lo3, rm_ext, is_mem);
+      out->op_count = 0;
+      out->size = (uint8_t)i;
+      set_bytes(out, p, i);
+      return i;
+    }
 
     // group 81/83: add/sub/cmp/and
     if (op->flags & (OF_GRP81 | OF_GRP83)) {
@@ -377,6 +391,53 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
         out->op_count = 2;
         out->ops[0] = dst;
         out->ops[1] = make_imm(width, imm);
+      }
+
+      out->size = (uint8_t)i;
+      set_bytes(out, p, i);
+      return i;
+    }
+
+    // C6 /0: mov r/m8, imm8
+    if (op->flags & OF_GRP_C6) {
+      if (subop != 0) {
+        out->op = OP_INVALID;
+        out->op_count = 0;
+        out->size = (uint8_t)i;
+        set_bytes(out, p, i);
+        return i;
+      }
+
+      Operand dst = rm_to_operand(&rex, p, n, &i, 8, mod, rm_lo3, rm_ext, is_mem);
+      if (i + 1 > n) return 0;
+      int64_t imm = read_i8(p + i);
+      i += 1;
+
+      out->op = OP_MOV;
+      out->op_count = 2;
+      out->ops[0] = dst;
+      out->ops[1] = make_imm(8, imm);
+
+      out->size = (uint8_t)i;
+      set_bytes(out, p, i);
+      return i;
+    }
+
+    // FF group: /2 CALL r/m64, /4 JMP r/m64
+    if (op->flags & OF_GRP_FF) {
+      Operand tgt = rm_to_operand(&rex, p, n, &i, 64, mod, rm_lo3, rm_ext, is_mem);
+
+      if (subop == 2) {
+        out->op = OP_CALL_RM;
+        out->op_count = 1;
+        out->ops[0] = tgt;
+      } else if (subop == 4) {
+        out->op = OP_JMP_RM;
+        out->op_count = 1;
+        out->ops[0] = tgt;
+      } else {
+        out->op = OP_INVALID;
+        out->op_count = 0;
       }
 
       out->size = (uint8_t)i;
@@ -418,13 +479,23 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
-    } else if (b1 == 0x08) {   // or r/m8, r8   (NEW)
+    } else if (b1 == 0x08) {   // or r/m8, r8
       out->op = OP_OR;
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
-    } else if (b1 == 0x39) {   // cmp r/m, r   (NEW)
+    } else if (b1 == 0x39) {   // cmp r/m, r
       out->op = OP_CMP;
+      out->op_count = 2;
+      out->ops[0] = o_rm;
+      out->ops[1] = o_reg;
+    } else if (b1 == 0x01) {   // add r/m, r
+      out->op = OP_ADD;
+      out->op_count = 2;
+      out->ops[0] = o_rm;
+      out->ops[1] = o_reg;
+    } else if (b1 == 0x29) {   // sub r/m, r
+      out->op = OP_SUB;
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
@@ -433,7 +504,15 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
+    } else {
+      // unknown ModRM opcode in our MVP
+      out->op = OP_INVALID;
+      out->op_count = 0;
     }
+
+    out->size = (uint8_t)i;
+    set_bytes(out, p, i);
+    return i;
   }
 
   out->size = (uint8_t)i;

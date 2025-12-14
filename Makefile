@@ -8,7 +8,8 @@ SRCS= \
   src/modules/decode_x86_64.c \
   src/modules/opcodes_x86_64.c \
   src/modules/format_intel.c \
-  src/modules/elf_text.c
+  src/modules/elf_text.c     \
+  src/modules/elf64.c
 
 OBJS=$(SRCS:%.c=build/obj/%.o)
 

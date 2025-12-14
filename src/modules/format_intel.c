@@ -39,6 +39,15 @@ static const char* reg8(uint8_t r) {
   return "r?b";
 }
 
+static const char* regxmm(uint8_t r) {
+  static const char *names[16] = {
+    "xmm0","xmm1","xmm2","xmm3","xmm4","xmm5","xmm6","xmm7",
+    "xmm8","xmm9","xmm10","xmm11","xmm12","xmm13","xmm14","xmm15"
+  };
+  if (r < 16) return names[r];
+  return "xmm?";
+}
+
 const char* reg_name64(uint8_t r) { return reg64(r); }
 
 const char* cc_name(Cond cc) {
@@ -51,23 +60,33 @@ const char* cc_name(Cond cc) {
 
 static const char* op_name(Op op) {
   switch (op) {
-    case OP_RET: return "ret";
+    case OP_RET:      return "ret";
     case OP_CALL_REL: return "call";
-    case OP_JMP_REL: return "jmp";
-    case OP_JCC_REL: return "jcc";
-    case OP_PUSH: return "push";
-    case OP_POP: return "pop";
-    case OP_MOV: return "mov";
-    case OP_LEA: return "lea";
-    case OP_XOR: return "xor";
-    case OP_ADD: return "add";
-    case OP_SUB: return "sub";
-    case OP_CMP: return "cmp";
-    case OP_TEST:return "test";
+    case OP_JMP_REL:  return "jmp";
+    case OP_JCC_REL:  return "jcc";
 
-    case OP_NOP: return "nop";
-    case OP_CLI: return "cli";
+    case OP_CALL_RM:  return "call";
+    case OP_JMP_RM:   return "jmp";
+
+    case OP_PUSH: return "push";
+    case OP_POP:  return "pop";
+
+    case OP_MOV:  return "mov";
+    case OP_LEA:  return "lea";
+    case OP_XOR:  return "xor";
+    case OP_AND:  return "and";
+    case OP_OR:   return "or";
+    case OP_ADD:  return "add";
+    case OP_SUB:  return "sub";
+    case OP_CMP:  return "cmp";
+    case OP_TEST: return "test";
+
+    case OP_NOP:   return "nop";
+    case OP_CLI:   return "cli";
     case OP_ENDBR: return "endbr64";
+
+    case OP_SETCC: return "setcc";
+    case OP_PXOR:  return "pxor";
 
     default: return "db";
   }
@@ -109,10 +128,11 @@ static void print_mem(FILE *out, const Operand *o) {
 
 static void print_reg(FILE *out, uint8_t reg, uint8_t width) {
   switch (width) {
-    case 8:  fprintf(out, "%s", reg8(reg));  break;
-    case 16: fprintf(out, "%s", reg16(reg)); break;
-    case 32: fprintf(out, "%s", reg32(reg)); break;
-    default: fprintf(out, "%s", reg64(reg)); break;
+    case 8:   fprintf(out, "%s", reg8(reg));  break;
+    case 16:  fprintf(out, "%s", reg16(reg)); break;
+    case 32:  fprintf(out, "%s", reg32(reg)); break;
+    case 128: fprintf(out, "%s", regxmm(reg)); break;
+    default:  fprintf(out, "%s", reg64(reg)); break; // 64
   }
 }
 
@@ -135,6 +155,8 @@ static void print_operand(FILE *out, const Operand *o) {
 void format_intel(FILE *out, const Insn *in) {
   if (in->op == OP_JCC_REL && in->has_cc) {
     fprintf(out, "j%s ", cc_name(in->cc));
+  } else if (in->op == OP_SETCC && in->has_cc) {
+    fprintf(out, "set%s ", cc_name(in->cc));
   } else {
     fprintf(out, "%s ", op_name(in->op));
   }

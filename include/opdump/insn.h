@@ -28,6 +28,8 @@ typedef enum {
   OP_SETCC,
   OP_PXOR,
 
+  OP_CALL_RM,
+  OP_JMP_RM,
 
 } Op;
 

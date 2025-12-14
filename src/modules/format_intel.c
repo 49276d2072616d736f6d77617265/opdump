@@ -31,7 +31,6 @@ static const char* reg16(uint8_t r) {
 }
 
 static const char* reg8(uint8_t r) {
-  // MVP: low 8-bit only; ignores AH/BH/etc (fine for our subset)
   static const char *names[16] = {
     "al","cl","dl","bl","spl","bpl","sil","dil",
     "r8b","r9b","r10b","r11b","r12b","r13b","r14b","r15b"
@@ -65,6 +64,11 @@ static const char* op_name(Op op) {
     case OP_SUB: return "sub";
     case OP_CMP: return "cmp";
     case OP_TEST:return "test";
+
+    case OP_NOP: return "nop";
+    case OP_CLI: return "cli";
+    case OP_ENDBR: return "endbr64";
+
     default: return "db";
   }
 }
@@ -108,7 +112,7 @@ static void print_reg(FILE *out, uint8_t reg, uint8_t width) {
     case 8:  fprintf(out, "%s", reg8(reg));  break;
     case 16: fprintf(out, "%s", reg16(reg)); break;
     case 32: fprintf(out, "%s", reg32(reg)); break;
-    default: fprintf(out, "%s", reg64(reg)); break; // 64
+    default: fprintf(out, "%s", reg64(reg)); break;
   }
 }
 

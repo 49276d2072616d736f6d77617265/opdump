@@ -3,22 +3,32 @@
 
 typedef enum {
   OP_INVALID = 0,
+
   OP_RET,
   OP_CALL_REL,
   OP_JMP_REL,
   OP_JCC_REL,
+
   OP_PUSH,
   OP_POP,
+
   OP_MOV,
   OP_LEA,
   OP_XOR,
 
-  // new
   OP_ADD,
   OP_SUB,
   OP_CMP,
   OP_TEST,
+
+  // misc / prefixes
+  OP_NOP,
+  OP_CLI,
+  OP_ENDBR,
+
 } Op;
+
+
 
 typedef enum {
   CC_O=0, CC_NO, CC_B, CC_AE, CC_E, CC_NE, CC_BE, CC_A,

@@ -68,21 +68,103 @@ static Operand make_reg64(uint8_t r) {
   return o;
 }
 
-static Operand make_mem64(uint8_t base, int32_t disp) {
+static Operand make_mem64(uint8_t base, uint8_t index, uint8_t scale, int32_t disp) {
   Operand o;
   memset(&o, 0, sizeof(o));
   o.kind = O_MEM;
   o.width = 64;
-  o.mem.base = base;         // 0..16 or 0xFF
-  o.mem.index = 0xFF;        // MVP: no index yet
-  o.mem.scale = 1;
-  o.mem.disp = disp;
+  o.mem.base  = base;   // 0..16, or 0xFF none
+  o.mem.index = index;  // 0..15, or 0xFF none
+  o.mem.scale = scale;  // 1,2,4,8
+  o.mem.disp  = disp;
   return o;
 }
 
-static Operand rm_operand_mvp(uint8_t mod, uint8_t rm_ext, int32_t disp, int is_mem) {
+static size_t read_disp_by_mod(const uint8_t *p, size_t n, uint8_t mod, int32_t *out_disp) {
+  *out_disp = 0;
+  if (mod == 1) {
+    if (n < 1) return 0;
+    *out_disp = (int32_t)read_i8(p);
+    return 1;
+  }
+  if (mod == 2) {
+    if (n < 4) return 0;
+    *out_disp = (int32_t)read_i32(p);
+    return 4;
+  }
+  return 0; // mod 0 or 3: no disp here (handled specially when needed)
+}
+
+static Operand rm_to_operand_mvp(const Rex *rex, const uint8_t *p, size_t n, size_t *io_i,
+                                 uint8_t mod, uint8_t rm_lo3, uint8_t rm_ext,
+                                 int is_mem) {
   if (!is_mem) return make_reg64(rm_ext);
-  return make_mem64(rm_ext, disp);
+
+  // memory form
+  uint8_t base  = rm_ext;
+  uint8_t index = 0xFF;
+  uint8_t scale = 1;
+  int32_t disp  = 0;
+
+  // SIB?
+  if (rm_lo3 == 4) {
+    if (*io_i >= n) return make_mem64(0xFF, 0xFF, 1, 0);
+
+    uint8_t sib = p[(*io_i)++];
+    uint8_t ss  = (uint8_t)(sib >> 6);
+    uint8_t idx = (uint8_t)((sib >> 3) & 7);
+    uint8_t bas = (uint8_t)(sib & 7);
+
+    scale = (uint8_t)(1u << ss);
+
+    // index==4 means "no index" (even in x86-64)
+    if (idx == 4) {
+      index = 0xFF;
+    } else {
+      index = (uint8_t)(idx | (rex->rex_x ? 8 : 0));
+    }
+
+    // base
+    bas = (uint8_t)(bas | (rex->rex_b ? 8 : 0));
+
+    if (mod == 0 && (sib & 7) == 5) {
+      // no base, disp32 follows
+      base = 0xFF;
+      if (*io_i + 4 > n) return make_mem64(0xFF, index, scale, 0);
+      disp = (int32_t)read_i32(p + *io_i);
+      *io_i += 4;
+      return make_mem64(base, index, scale, disp);
+    }
+
+    base = bas;
+
+    // disp for mod 1/2
+    size_t used = read_disp_by_mod(p + *io_i, n - *io_i, mod, &disp);
+    if (mod == 1 || mod == 2) {
+      if (used == 0) return make_mem64(base, index, scale, 0);
+      *io_i += used;
+    }
+
+    return make_mem64(base, index, scale, disp);
+  }
+
+  // no SIB, classic ModRM addressing
+  if (mod == 0 && rm_lo3 == 5) {
+    // RIP-relative disp32 in x86-64
+    if (*io_i + 4 > n) return make_mem64(16, 0xFF, 1, 0);
+    disp = (int32_t)read_i32(p + *io_i);
+    *io_i += 4;
+    return make_mem64(16 /*rip*/, 0xFF, 1, disp);
+  }
+
+  // disp8/disp32 for mod 1/2
+  size_t used = read_disp_by_mod(p + *io_i, n - *io_i, mod, &disp);
+  if (mod == 1 || mod == 2) {
+    if (used == 0) return make_mem64(base, 0xFF, 1, 0);
+    *io_i += used;
+  }
+
+  return make_mem64(base, 0xFF, 1, disp);
 }
 
 size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t addr, Insn *out) {
@@ -176,47 +258,14 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
 
     uint8_t mod = get_mod(modrm);
     uint8_t reg = (uint8_t)(get_reg(modrm) | (rex.rex_r ? 8 : 0));
-    uint8_t rm  = (uint8_t)(get_rm(modrm)  | (rex.rex_b ? 8 : 0));
 
-    // SIB not supported yet (rm low3==4) when memory mode
-    if (mod != 3 && ((modrm & 7) == 4)) {
-      // consume what we know (prefix+opcode+modrm) and move on
-      out->op = OP_INVALID;
-      out->op_count = 0;
-      out->size = (uint8_t)i;
-      set_bytes(out, p, i);
-      return i;
-    }
+    uint8_t rm_lo3 = get_rm(modrm); // low 3 bits
+    uint8_t rm_ext = (uint8_t)(rm_lo3 | (rex.rex_b ? 8 : 0));
 
-    int32_t disp = 0;
     int is_mem = (mod != 3);
 
-    if (mod == 0) {
-      if ((modrm & 7) == 5) {
-        // RIP-relative disp32 in x86-64: [rip + disp32]
-        if (i + 4 > n) return 0;
-        disp = (int32_t)read_i32(p + i);
-        i += 4;
-        rm = 16; // use 16 as "rip"
-        is_mem = 1;
-      } else {
-        disp = 0;
-      }
-    } else if (mod == 1) {
-      if (i + 1 > n) return 0;
-      disp = (int32_t)read_i8(p + i);
-      i += 1;
-    } else if (mod == 2) {
-      if (i + 4 > n) return 0;
-      disp = (int32_t)read_i32(p + i);
-      i += 4;
-    } else {
-      // mod==3 reg-reg, disp unused
-      disp = 0;
-    }
-
     Operand o_reg = make_reg64(reg);
-    Operand o_rm  = rm_operand_mvp(mod, rm, disp, is_mem);
+    Operand o_rm  = rm_to_operand_mvp(&rex, p, n, &i, mod, rm_lo3, rm_ext, is_mem);
 
     if (b1 == 0x89) {
       // mov r/m64, r64
@@ -229,7 +278,7 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
       out->ops[0] = o_reg;
       out->ops[1] = o_rm;
     } else if (b1 == 0x8D) {
-      // lea r64, m (allow reg form for now)
+      // lea r64, m
       out->op_count = 2;
       out->ops[0] = o_reg;
       out->ops[1] = o_rm;

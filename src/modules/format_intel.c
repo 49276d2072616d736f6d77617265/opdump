@@ -35,34 +35,41 @@ static const char* op_name(Op op) {
   }
 }
 
-static void print_hex_disp(FILE *out, int32_t disp) {
+static void print_disp(FILE *out, int32_t disp, int wrote_any) {
   if (disp == 0) return;
 
-  if (disp < 0) {
-    uint32_t v = (uint32_t)(-disp);
-    fprintf(out, "-0x%x", v);
-  } else {
-    fprintf(out, "+0x%x", (uint32_t)disp);
+  if (!wrote_any) {
+    // first term: allow negative directly
+    if (disp < 0) fprintf(out, "-0x%x", (unsigned)(uint32_t)(-disp));
+    else          fprintf(out, "0x%x",  (unsigned)(uint32_t)disp);
+    return;
   }
+
+  if (disp < 0) fprintf(out, "-0x%x", (unsigned)(uint32_t)(-disp));
+  else          fprintf(out, "+0x%x",  (unsigned)(uint32_t)disp);
 }
 
 static void print_mem(FILE *out, const Operand *o) {
-  // MVP: base + disp, no index/scale yet
-  // base: 0..16, 0xFF = none
   fprintf(out, "[");
 
-  int wrote_base = 0;
+  int wrote = 0;
+
+  // base
   if (o->mem.base != 0xFF) {
     fprintf(out, "%s", reg_name64(o->mem.base));
-    wrote_base = 1;
+    wrote = 1;
   }
 
-  if (!wrote_base) {
-    // absolute-ish (rare for x86-64, but keep it valid)
-    fprintf(out, "0x%x", (unsigned)(uint32_t)o->mem.disp);
-  } else {
-    print_hex_disp(out, o->mem.disp);
+  // index*scale
+  if (o->mem.index != 0xFF) {
+    if (wrote) fprintf(out, "+");
+    fprintf(out, "%s", reg_name64(o->mem.index));
+    if (o->mem.scale != 1) fprintf(out, "*%u", (unsigned)o->mem.scale);
+    wrote = 1;
   }
+
+  // disp
+  print_disp(out, o->mem.disp, wrote);
 
   fprintf(out, "]");
 }

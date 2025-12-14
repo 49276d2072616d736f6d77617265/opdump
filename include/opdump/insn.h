@@ -15,18 +15,22 @@ typedef enum {
   OP_MOV,
   OP_LEA,
   OP_XOR,
-
+  OP_AND,   // NEW
   OP_ADD,
   OP_SUB,
   OP_CMP,
   OP_TEST,
 
-  // misc / prefixes
   OP_NOP,
   OP_CLI,
   OP_ENDBR,
+  OP_OR,
+  OP_SETCC,
+  OP_PXOR,
+
 
 } Op;
+
 
 
 

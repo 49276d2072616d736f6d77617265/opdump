@@ -55,7 +55,8 @@ static const OpEntry* match_op_2(uint8_t b1, uint8_t b2) {
     if (e->b1 != b1) continue;
 
     if (e->flags & OF_REG_RANGE) {
-      if (e->b2 == 0x80 && b2 >= 0x80 && b2 <= 0x8F) return e;
+      if (e->b2 == 0x80 && b2 >= 0x80 && b2 <= 0x8F) return e; // Jcc
+      if (e->b2 == 0x90 && b2 >= 0x90 && b2 <= 0x9F) return e; // SETcc
     } else {
       if (e->b2 == b2) return e;
     }
@@ -175,7 +176,9 @@ static Operand rm_to_operand(const Rex *rex, const uint8_t *p, size_t n, size_t 
 }
 
 static Op grp_alu_op(uint8_t subop) {
+  // minimal subset (expand later)
   if (subop == 0) return OP_ADD; // /0
+  if (subop == 4) return OP_AND; // /4
   if (subop == 5) return OP_SUB; // /5
   if (subop == 7) return OP_CMP; // /7
   return OP_INVALID;
@@ -188,7 +191,7 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
 
   size_t i = 0;
 
-  // ENDBR64: F3 0F 1E FA (must be detected before prefix-scan)
+  // ENDBR64: F3 0F 1E FA
   if (ctx->is64 && n >= 4 && p[0] == 0xF3 && p[1] == 0x0F && p[2] == 0x1E && p[3] == 0xFA) {
     out->op = OP_ENDBR;
     out->op_count = 0;
@@ -197,7 +200,7 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     return 4;
   }
 
-  // Legacy prefix scan (minimal)
+  // legacy prefixes (skip)
   while (i < n) {
     uint8_t b = p[i];
     int is_prefix =
@@ -209,9 +212,8 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     i++;
   }
 
-  // REX (after legacy prefixes)
-  Rex rex;
-  memset(&rex, 0, sizeof(rex));
+  // REX (after prefixes)
+  Rex rex = {0};
   if (ctx->is64 && i < n) {
     uint8_t b = p[i];
     if ((b & 0xF0) == 0x40) {
@@ -248,13 +250,19 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
 
   out->op = op->op;
 
-  // Jcc
+  // Jcc condition
   if ((op->flags & OF_CC) && out->op == OP_JCC_REL) {
     out->has_cc = 1;
     out->cc = (Cond)((op->kind == OT_1 ? b1 : b2) & 0x0F);
   }
 
-  // rel
+  // SETcc condition (0F 90..9F)
+  if ((op->flags & OF_CC) && out->op == OP_SETCC) {
+    out->has_cc = 1;
+    out->cc = (Cond)(b2 & 0x0F);
+  }
+
+  // rel8 / rel32 (FIXED: compute in int64_t)
   if (op->flags & OF_REL8) {
     if (i + 1 > n) return 0;
     out->has_rel = 1;
@@ -262,8 +270,11 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->rel = read_i8(p + i);
     i += 1;
 
+    int64_t next = (int64_t)(addr + i);
+    int64_t tgt  = next + out->rel;
+
     out->op_count = 1;
-    out->ops[0] = make_imm(64, (int64_t)(addr + (uint64_t)i + out->rel));
+    out->ops[0] = make_imm(64, tgt);
   } else if (op->flags & OF_REL32) {
     if (i + 4 > n) return 0;
     out->has_rel = 1;
@@ -271,11 +282,14 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->rel = read_i32(p + i);
     i += 4;
 
+    int64_t next = (int64_t)(addr + i);
+    int64_t tgt  = next + out->rel;
+
     out->op_count = 1;
-    out->ops[0] = make_imm(64, (int64_t)(addr + (uint64_t)i + out->rel));
+    out->ops[0] = make_imm(64, tgt);
   }
 
-  // push/pop range
+  // push/pop reg ranges
   if (out->op == OP_PUSH || out->op == OP_POP) {
     uint8_t low = (uint8_t)(b1 & 7);
     uint8_t reg = (uint8_t)(low | (rex.rex_b ? 8 : 0));
@@ -283,7 +297,7 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     out->ops[0] = make_reg(64, reg);
   }
 
-  // mov r32/r64, imm (B8..BF) + REX.B extends reg
+  // mov r32/r64, imm (B8..BF)
   if ((op->flags & OF_MOV_IMM_REG) && (op->flags & OF_REG_RANGE)) {
     uint8_t low = (uint8_t)(b1 & 7);
     uint8_t reg = (uint8_t)(low | (rex.rex_b ? 8 : 0));
@@ -326,34 +340,19 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
     uint8_t modrm = p[i++];
     uint8_t mod = get_mod(modrm);
 
-    // group selector uses reg3 WITHOUT rex.r extension
-    uint8_t subop = get_reg3(modrm);
+    uint8_t subop = get_reg3(modrm); // group selector (NO rex.r extension)
 
-    // reg operand for /r uses rex.r extension
     uint8_t reg_ext = (uint8_t)(get_reg3(modrm) | (rex.rex_r ? 8 : 0));
     uint8_t rm_lo3  = get_rm3(modrm);
     uint8_t rm_ext  = (uint8_t)(rm_lo3 | (rex.rex_b ? 8 : 0));
 
     int is_mem = (mod != 3);
-    uint8_t width = rex.rex_w ? 64 : 32;
 
-    // 0F 1F /0 = multi-byte NOP
-    if (b1 == 0x0F && b2 == 0x1F) {
-      if (subop != 0) {
-        out->op = OP_INVALID;
-        out->op_count = 0;
-      } else {
-        out->op = OP_NOP;
-        out->op_count = 0;
-        // consume addressing bytes so length is correct
-        (void)rm_to_operand(&rex, p, n, &i, 64, mod, rm_lo3, rm_ext, is_mem);
-      }
-      out->size = (uint8_t)i;
-      set_bytes(out, p, i);
-      return i;
-    }
+    // width per opcode (MVP):
+    // SETcc and OR(0x08) are 8-bit.
+    uint8_t width = (b1 == 0x08 || out->op == OP_SETCC) ? 8 : (rex.rex_w ? 64 : 32);
 
-    // group 81/83
+    // group 81/83: add/sub/cmp/and
     if (op->flags & (OF_GRP81 | OF_GRP83)) {
       Op gop = grp_alu_op(subop);
       if (gop == OP_INVALID) {
@@ -385,50 +384,52 @@ size_t decode_one(const DecodeCtx *ctx, const uint8_t *p, size_t n, uint64_t add
       return i;
     }
 
-    // group C7 /0: mov r/m, imm32
-    if (op->flags & OF_GRP_C7) {
-      if (subop != 0) {
-        out->op = OP_INVALID;
-        out->op_count = 0;
-      } else {
-        Operand dst = rm_to_operand(&rex, p, n, &i, width, mod, rm_lo3, rm_ext, is_mem);
-
-        if (i + 4 > n) return 0;
-        int64_t imm = read_i32(p + i);
-        i += 4;
-
-        out->op = OP_MOV;
-        out->op_count = 2;
-        out->ops[0] = dst;
-        out->ops[1] = make_imm(width, imm);
-      }
+    // SETcc: 0F 90..9F /r  => setcc r/m8
+    if (out->op == OP_SETCC) {
+      Operand dst = rm_to_operand(&rex, p, n, &i, 8, mod, rm_lo3, rm_ext, is_mem);
+      out->op_count = 1;
+      out->ops[0] = dst;
 
       out->size = (uint8_t)i;
       set_bytes(out, p, i);
       return i;
     }
 
-    // normal /r (mov/lea/xor/test)
     Operand o_reg = make_reg(width, reg_ext);
     Operand o_rm  = rm_to_operand(&rex, p, n, &i, width, mod, rm_lo3, rm_ext, is_mem);
 
     if (b1 == 0x89) {          // mov r/m, r
+      out->op = OP_MOV;
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
     } else if (b1 == 0x8B) {   // mov r, r/m
+      out->op = OP_MOV;
       out->op_count = 2;
       out->ops[0] = o_reg;
       out->ops[1] = o_rm;
     } else if (b1 == 0x8D) {   // lea r, m
+      out->op = OP_LEA;
       out->op_count = 2;
       out->ops[0] = o_reg;
       out->ops[1] = o_rm;
     } else if (b1 == 0x31) {   // xor r/m, r
+      out->op = OP_XOR;
+      out->op_count = 2;
+      out->ops[0] = o_rm;
+      out->ops[1] = o_reg;
+    } else if (b1 == 0x08) {   // or r/m8, r8   (NEW)
+      out->op = OP_OR;
+      out->op_count = 2;
+      out->ops[0] = o_rm;
+      out->ops[1] = o_reg;
+    } else if (b1 == 0x39) {   // cmp r/m, r   (NEW)
+      out->op = OP_CMP;
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
     } else if (b1 == 0x85) {   // test r/m, r
+      out->op = OP_TEST;
       out->op_count = 2;
       out->ops[0] = o_rm;
       out->ops[1] = o_reg;
